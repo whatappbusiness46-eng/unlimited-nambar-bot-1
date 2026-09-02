@@ -955,10 +955,790 @@ Example:
 """
     )
 
-
 # ============================================================
 # SUPPORT
 # ============================================================
 
 async def support(update, context):
-    await update.message.reply_text
+    await update.message.reply_text(
+        f"""
+🆘 SUPPORT
+
+Contact:
+{SUPPORT_USERNAME}
+"""
+    )
+
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+async def admin(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    await update.message.reply_text(
+        "🔐 ADMIN PANEL",
+        reply_markup=admin_keyboard(),
+    )
+
+
+async def admin_users(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    count = db.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    await update.message.reply_text(
+        f"👥 Total Users: {count}"
+    )
+
+
+async def statistics(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    users = db.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    orders_count = db.execute(
+        "SELECT COUNT(*) AS c FROM orders"
+    ).fetchone()["c"]
+
+    active = db.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM orders
+        WHERE status='active'
+        """
+    ).fetchone()["c"]
+
+    withdrawn = db.execute(
+        """
+        SELECT COALESCE(SUM(amount),0) AS s
+        FROM withdrawals
+        WHERE status='approved'
+        """
+    ).fetchone()["s"]
+
+    await update.message.reply_text(
+        f"""
+📊 STATISTICS
+
+👥 Users: {users}
+
+📦 Orders: {orders_count}
+
+📱 Active Orders: {active}
+
+💸 Approved Withdraw:
+${withdrawn:.2f}
+"""
+    )
+
+
+# ============================================================
+# ADMIN ADD BALANCE
+# ============================================================
+
+async def admin_add_balance(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    context.user_data["action"] = "admin_add"
+
+    await update.message.reply_text(
+        """
+➕ ADD BALANCE
+
+Format:
+
+USER_ID AMOUNT
+
+Example:
+
+123456789 10
+"""
+    )
+
+
+async def admin_remove_balance(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    context.user_data["action"] = "admin_remove"
+
+    await update.message.reply_text(
+        """
+➖ REMOVE BALANCE
+
+Format:
+
+USER_ID AMOUNT
+"""
+    )
+
+
+# ============================================================
+# ADMIN BAN
+# ============================================================
+
+async def admin_ban(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    context.user_data["action"] = "ban"
+
+    await update.message.reply_text(
+        "Send User ID to ban."
+    )
+
+
+async def admin_unban(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    context.user_data["action"] = "unban"
+
+    await update.message.reply_text(
+        "Send User ID to unban."
+    )
+
+
+# ============================================================
+# ADMIN BROADCAST
+# ============================================================
+
+async def admin_broadcast(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    context.user_data["action"] = "broadcast"
+
+    await update.message.reply_text(
+        "📢 Send the broadcast message."
+    )
+
+
+async def do_broadcast(update, context):
+    users = db.execute(
+        "SELECT user_id FROM users WHERE banned=0"
+    ).fetchall()
+
+    success = 0
+
+    for row in users:
+        if await safe_send(
+            context,
+            row["user_id"],
+            update.message.text,
+        ):
+            success += 1
+
+    await update.message.reply_text(
+        f"""
+📢 BROADCAST COMPLETE
+
+👥 Sent:
+{success}/{len(users)}
+"""
+    )
+
+
+# ============================================================
+# ADMIN WITHDRAWALS
+# ============================================================
+
+async def admin_withdrawals(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    rows = db.execute(
+        """
+        SELECT * FROM withdrawals
+        WHERE status='pending'
+        ORDER BY id DESC
+        LIMIT 20
+        """
+    ).fetchall()
+
+    if not rows:
+        await update.message.reply_text(
+            "💸 No pending withdrawals."
+        )
+        return
+
+    for row in rows:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "✅ Approve",
+                        callback_data=f"wdapprove:{row['id']}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Reject",
+                        callback_data=f"wdreject:{row['id']}",
+                    ),
+                ]
+            ]
+        )
+
+        await update.message.reply_text(
+            f"""
+💸 WITHDRAW REQUEST
+
+🆔 #{row['id']}
+👤 User: {row['user_id']}
+
+💰 Amount:
+${row['amount']:.2f}
+
+💳 Method:
+{row['method']}
+
+📌 Account:
+{row['account']}
+
+📊 Status:
+{row['status']}
+""",
+            reply_markup=keyboard,
+        )
+
+
+# ============================================================
+# WITHDRAW CALLBACKS
+# ============================================================
+
+async def withdrawal_callback(update, context):
+    query = update.callback_query
+
+    if query.from_user.id != ADMIN_ID:
+        await query.answer(
+            "Admin only.",
+            show_alert=True,
+        )
+        return
+
+    await query.answer()
+
+    data = query.data
+
+    if data.startswith("wdapprove:"):
+        wid = int(data.split(":")[1])
+
+        row = db.execute(
+            "SELECT * FROM withdrawals WHERE id=?",
+            (wid,),
+        ).fetchone()
+
+        if not row or row["status"] != "pending":
+            await query.edit_message_text(
+                "Request already processed."
+            )
+            return
+
+        db.execute(
+            """
+            UPDATE withdrawals
+            SET status='approved'
+            WHERE id=?
+            """,
+            (wid,),
+        )
+
+        db.execute(
+            """
+            UPDATE users
+            SET total_withdraw=total_withdraw+?
+            WHERE user_id=?
+            """,
+            (row["amount"], row["user_id"]),
+        )
+
+        db.commit()
+
+        await query.edit_message_text(
+            f"✅ Withdrawal #{wid} approved."
+        )
+
+        await safe_send(
+            context,
+            row["user_id"],
+            f"""
+✅ Withdrawal Approved
+
+🆔 #{wid}
+💰 Amount: ${row['amount']:.2f}
+"""
+        )
+
+    elif data.startswith("wdreject:"):
+        wid = int(data.split(":")[1])
+
+        row = db.execute(
+            "SELECT * FROM withdrawals WHERE id=?",
+            (wid,),
+        ).fetchone()
+
+        if not row or row["status"] != "pending":
+            await query.edit_message_text(
+                "Request already processed."
+            )
+            return
+
+        db.execute(
+            """
+            UPDATE withdrawals
+            SET status='rejected'
+            WHERE id=?
+            """,
+            (wid,),
+        )
+
+        change_balance(
+            row["user_id"],
+            row["amount"],
+        )
+
+        await query.edit_message_text(
+            f"❌ Withdrawal #{wid} rejected and refunded."
+        )
+
+        await safe_send(
+            context,
+            row["user_id"],
+            f"""
+❌ Withdrawal Rejected
+
+🆔 #{wid}
+
+💰 Refunded:
+${row['amount']:.2f}
+"""
+        )
+
+
+# ============================================================
+# SERVICE INFO
+# ============================================================
+
+async def services(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    text = "📦 SERVICES\n\n"
+
+    for country, services_list in SERVICES.items():
+        text += f"🌍 {country}\n"
+
+        for service, price in services_list.items():
+            text += (
+                f"  • {service}: ${price:.2f}\n"
+            )
+
+        text += "\n"
+
+    await update.message.reply_text(text)
+
+
+async def inventory(update, context):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    text = "📱 DEMO INVENTORY\n\n"
+
+    for number in DEMO_NUMBERS:
+        text += f"• {number}\n"
+
+    text += "\n⚠️ Demo/test numbers only."
+
+    await update.message.reply_text(text)
+
+
+# ============================================================
+# TEXT ACTION HANDLER
+# ============================================================
+
+async def text_handler(update, context):
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    await ensure_user(update)
+
+    if banned(user_id):
+        await update.message.reply_text(
+            "🚫 Your account is banned."
+        )
+        return
+
+    action = context.user_data.get("action")
+
+    # -------------------------
+    # USER WITHDRAW FLOW
+    # -------------------------
+
+    if action == "withdraw_amount":
+
+        try:
+            amount = float(text)
+
+            if amount < MIN_WITHDRAW:
+                raise ValueError()
+
+            if amount > balance(user_id):
+                raise ValueError()
+
+            context.user_data["withdraw_amount"] = amount
+            context.user_data["action"] = "withdraw_method"
+
+            await update.message.reply_text(
+                """
+💳 Send withdrawal method.
+
+Example:
+
+bKash
+Nagad
+USDT
+"""
+            )
+
+        except Exception:
+            await update.message.reply_text(
+                "❌ Invalid amount."
+            )
+
+        return
+
+    if action == "withdraw_method":
+
+        context.user_data["withdraw_method"] = text
+        context.user_data["action"] = "withdraw_account"
+
+        await update.message.reply_text(
+            "📌 Send your payment account/address."
+        )
+
+        return
+
+    if action == "withdraw_account":
+
+        amount = context.user_data["withdraw_amount"]
+        method = context.user_data["withdraw_method"]
+        account = text
+
+        wid = create_withdraw(
+            user_id,
+            amount,
+            method,
+            account,
+        )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"""
+✅ Withdrawal Request Created
+
+🆔 Request: #{wid}
+
+💰 Amount:
+${amount:.2f}
+
+💳 Method:
+{method}
+
+⏳ Status:
+Pending
+
+Admin will review your request.
+"""
+        )
+
+        return
+
+    # -------------------------
+    # ADMIN ACTIONS
+    # -------------------------
+
+    if user_id == ADMIN_ID:
+
+        if action == "admin_add":
+
+            try:
+                target, amount = text.split()
+
+                target = int(target)
+                amount = float(amount)
+
+                if not get_user(target):
+                    await update.message.reply_text(
+                        "❌ User not found."
+                    )
+                    return
+
+                change_balance(target, amount)
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    f"""
+✅ Balance Added
+
+👤 User: {target}
+💰 Amount: ${amount:.2f}
+"""
+                )
+
+                await safe_send(
+                    context,
+                    target,
+                    f"""
+💰 Balance Added
+
+Your wallet has been credited:
+${amount:.2f}
+"""
+                )
+
+            except Exception:
+                await update.message.reply_text(
+                    "❌ Format: USER_ID AMOUNT"
+                )
+
+            return
+
+        if action == "admin_remove":
+
+            try:
+                target, amount = text.split()
+
+                target = int(target)
+                amount = float(amount)
+
+                if balance(target) < amount:
+                    await update.message.reply_text(
+                        "❌ Insufficient user balance."
+                    )
+                    return
+
+                change_balance(target, -amount)
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    "✅ Balance removed."
+                )
+
+            except Exception:
+                await update.message.reply_text(
+                    "❌ Format: USER_ID AMOUNT"
+                )
+
+            return
+
+        if action == "ban":
+
+            try:
+                target = int(text)
+
+                db.execute(
+                    "UPDATE users SET banned=1 WHERE user_id=?",
+                    (target,),
+                )
+                db.commit()
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    f"🚫 User {target} banned."
+                )
+
+            except Exception:
+                await update.message.reply_text(
+                    "❌ Invalid User ID."
+                )
+
+            return
+
+        if action == "unban":
+
+            try:
+                target = int(text)
+
+                db.execute(
+                    "UPDATE users SET banned=0 WHERE user_id=?",
+                    (target,),
+                )
+                db.commit()
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    f"✅ User {target} unbanned."
+                )
+
+            except Exception:
+                await update.message.reply_text(
+                    "❌ Invalid User ID."
+                )
+
+            return
+
+        if action == "broadcast":
+
+            context.user_data.clear()
+
+            await do_broadcast(
+                update,
+                context,
+            )
+
+            return
+
+    # -------------------------
+    # NORMAL MENU
+    # -------------------------
+
+    if text == "📱 Get Number":
+        await get_number(update, context)
+
+    elif text == "📊 Status":
+        await status(update, context)
+
+    elif text == "📋 Active Number":
+        await active_numbers(update, context)
+
+    elif text == "💰 Wallet":
+        await wallet(update, context)
+
+    elif text == "🔗 Refer":
+        await refer(update, context)
+
+    elif text == "👤 Profile":
+        await profile(update, context)
+
+    elif text == "💸 Withdraw":
+        await withdraw(update, context)
+
+    elif text == "🆘 Support":
+        await support(update, context)
+
+    elif text == "📋 Orders":
+        await orders(update, context)
+
+    # -------------------------
+    # ADMIN MENU
+    # -------------------------
+
+    elif user_id == ADMIN_ID:
+
+        if text == "👥 Users":
+            await admin_users(update, context)
+
+        elif text == "📊 Statistics":
+            await statistics(update, context)
+
+        elif text == "➕ Add Balance":
+            await admin_add_balance(update, context)
+
+        elif text == "➖ Remove Balance":
+            await admin_remove_balance(update, context)
+
+        elif text == "💸 Withdrawals":
+            await admin_withdrawals(update, context)
+
+        elif text == "📢 Broadcast":
+            await admin_broadcast(update, context)
+
+        elif text == "🚫 Ban User":
+            await admin_ban(update, context)
+
+        elif text == "✅ Unban User":
+            await admin_unban(update, context)
+
+        elif text == "📦 Services":
+            await services(update, context)
+
+        elif text == "📱 Demo Inventory":
+            await inventory(update, context)
+
+        elif text == "🏠 Main Menu":
+            await update.message.reply_text(
+                "🏠 Main Menu",
+                reply_markup=main_keyboard(),
+            )
+
+
+# ============================================================
+# ERROR
+# ============================================================
+
+async def error_handler(update, context):
+    logger.error(
+        "Update error: %s",
+        context.error,
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    if not BOT_TOKEN:
+        raise RuntimeError(
+            "BOT_TOKEN environment variable is missing."
+        )
+
+    db_init()
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    app.add_handler(
+        CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        CommandHandler("admin", admin)
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            withdrawal_callback,
+            pattern=r"^wd(approve|reject):",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            callback_handler
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            text_handler,
+        )
+    )
+
+    app.add_error_handler(error_handler)
+
+    print("🤖 Bot is running...")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
