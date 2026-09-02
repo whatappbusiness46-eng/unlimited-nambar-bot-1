@@ -931,4 +931,34 @@ Minimum: ${MIN_WITHDRAW:.2f}
 Your Balance: ${bal:.2f}
 """
         )
-  
+        return
+
+    context.user_data["action"] = "withdraw_amount"
+
+    await update.message.reply_text(
+        f"""
+💸 WITHDRAW
+
+Available:
+${bal:.2f}
+
+Minimum:
+${MIN_WITHDRAW:.2f}
+
+Fee:
+${WITHDRAW_FEE:.2f}
+
+Send withdrawal amount.
+
+Example:
+10
+"""
+    )
+
+
+# ============================================================
+# SUPPORT
+# ============================================================
+
+async def support(update, context):
+    await update.message.reply_text
